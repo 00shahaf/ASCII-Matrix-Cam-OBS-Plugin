@@ -21,7 +21,7 @@ How it works:
 """
 import argparse, os, sys, time
 import numpy as np
-from PySide6.QtCore import QRect, QSize, Qt, QTimer
+from PySide6.QtCore import QRect, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QImage, QKeySequence,
                            QPainter, QShortcut)
 
@@ -45,6 +45,52 @@ def qimage_to_array(img):
     w, h, bpl = img.width(), img.height(), img.bytesPerLine()
     a = np.frombuffer(img.constBits(), np.uint8, bpl * h).reshape(h, bpl)[:, :w * ch]
     return a.reshape(h, w, ch).copy() if ch == 3 else a.copy()
+
+
+class DynamicFramerate:
+    """The webcam's "exposure, dynamic framerate" switch (V4L2 exposure auto priority), Linux only.
+
+    When it's on, many webcams cut their frame rate (30 -> 15 or even 7 fps) to expose longer
+    whenever the picture gets darker, e.g. when you lean in and your face blocks the light.
+    It's a camera setting, not app work. The app only changes it when the user asks, and puts
+    the camera's own value back when it lets go of the camera.
+    Windows and macOS have no portable way to reach it, so there it reports itself unavailable."""
+    VIDIOC_G_CTRL, VIDIOC_S_CTRL, CID = 0xC008561B, 0xC008561C, 0x009A0903
+
+    def __init__(self, device_path):
+        self.path = device_path
+        self.original = self.get() if sys.platform.startswith("linux") and \
+            device_path.startswith("/dev/video") else None
+
+    @property
+    def available(self):
+        return self.original is not None
+
+    def _ioctl(self, request, value=0):
+        import fcntl, struct
+        fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            buf = bytearray(struct.pack("Ii", self.CID, value))
+            fcntl.ioctl(fd, request, buf)
+            return struct.unpack("Ii", buf)[1]
+        finally:
+            os.close(fd)
+
+    def get(self):
+        try:
+            return bool(self._ioctl(self.VIDIOC_G_CTRL))
+        except OSError:                 # no such control, no permission, camera unplugged
+            return None
+
+    def set(self, on):
+        try:
+            self._ioctl(self.VIDIOC_S_CTRL, int(on))
+        except OSError:
+            pass
+
+    def restore(self):
+        if self.available:
+            self.set(self.original)
 
 
 def render_glyphs(chars, font, cw, ch, mirror=False):
@@ -332,13 +378,22 @@ def run_gui(args):
             self.edges = QCheckBox("Edges", checked=True, toggled=lambda v: setattr(self.r, "edges_on", v))
             self.invert = QCheckBox("Invert", toggled=lambda v: setattr(self.r, "invert", v))
             self.mirror = QCheckBox("Mirror", checked=True)
+            # Off by default: the camera is left as it is unless the user asks.
+            self.settings = QSettings("ASCII Cam", "ASCII Cam")
+            self.steady = QCheckBox("Steady 30 fps", toolTip=(
+                "Stops the webcam from lowering its frame rate in dim light (for example when you\n"
+                "lean in close). The picture may get darker or noisier instead.\n"
+                "The camera's own setting is put back when you close the app."))
+            self.steady.setChecked(self.settings.value("steady_fps", False, type=bool))
+            self.steady.toggled.connect(self.set_steady)
+            self.dynfps = None
             snap = QPushButton("Snapshot", clicked=self.snapshot)
 
             self.bar = QWidget()
             bar = QHBoxLayout(self.bar)
             bar.setContentsMargins(0, 0, 0, 0)
             for w in (self.camera_box, self.mode_box, self.pal_box, QLabel("Detail"), self.cols_slider,
-                      self.cols_label, self.edges, self.invert, self.mirror):
+                      self.cols_label, self.edges, self.invert, self.mirror, self.steady):
                 bar.addWidget(w)
             bar.addStretch()
             bar.addWidget(snap)
@@ -374,12 +429,18 @@ def run_gui(args):
         def start_camera(self, i):
             if self.camera:
                 self.camera.stop()
+            if self.dynfps:
+                self.dynfps.restore()
             if not self.cams:
                 self.status.setText("No camera found")
                 return
             dev = self.cams[i]
             # Prefer ~720p: plenty for 300 columns and much cheaper to convert than 1080p
             fmts = [f for f in dev.videoFormats() if f.resolution().height() <= 720]
+            self.dynfps = DynamicFramerate(bytes(dev.id()).decode(errors="replace"))
+            # Only offer the switch when this camera has it
+            self.steady.setVisible(self.dynfps.available)
+            self.set_steady(self.steady.isChecked())
             self.camera = QCamera(dev)
             if fmts:
                 best = max(fmts, key=lambda f: (f.resolution().height(), f.maxFrameRate()))
@@ -387,6 +448,19 @@ def run_gui(args):
             self.camera.errorOccurred.connect(lambda e, s: self.status.setText(f"Camera error: {s}"))
             self.session.setCamera(self.camera)
             self.camera.start()
+
+        def set_steady(self, on):
+            self.settings.setValue("steady_fps", on)
+            if self.dynfps and self.dynfps.available:
+                # Checked: force dynamic framerate off. Unchecked: the camera's own value.
+                self.dynfps.set(False if on else self.dynfps.original)
+
+        def closeEvent(self, e):
+            if self.camera:
+                self.camera.stop()
+            if self.dynfps:
+                self.dynfps.restore()
+            super().closeEvent(e)
 
         def set_mode(self, m):
             self.r.mode = m
@@ -439,9 +513,16 @@ def run_gui(args):
     if os.path.exists(icon):
         from PySide6.QtGui import QIcon
         app.setWindowIcon(QIcon(icon))
-    app.setDesktopFileName("ascii-cam")
     win = Window()
     win.show()
+    # Ctrl+C in a terminal, or a logout's SIGTERM, should still close the window properly,
+    # so the camera's own frame-rate setting is put back.
+    import signal
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: win.close())
+    wake = QTimer(interval=250, timeout=lambda: None)   # lets Python run signal handlers
+    wake.start()
+    app.lastWindowClosed.connect(app.quit)
     sys.exit(app.exec())
 
 

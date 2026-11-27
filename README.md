@@ -96,6 +96,13 @@ If you move the folder, run the installer again. To remove the icons, run it wit
 Options: `--cols 200` (more detail), `--camera 1` (another camera), and
 `--still in.jpg out.png --mode Matrix` to convert one image without opening a window.
 
+**Choppy when you lean in close?** Many webcams lower their frame rate in dim light (down to 7 fps),
+and your face blocking the light is enough to trigger it. On Linux, tick **Steady 30 fps** in the app
+to stop that; the camera's own setting is put back when you close the app. In OBS on Linux, the
+*Video Capture Device (V4L2)* source's properties have the same switch: untick **Exposure, Dynamic
+Framerate**. On Windows, look for **Low-light compensation** in your camera's settings or its
+maker's app.
+
 | Key | Does |
 |---|---|
 | Space | Save a snapshot PNG to `Pictures/ASCII Cam` |

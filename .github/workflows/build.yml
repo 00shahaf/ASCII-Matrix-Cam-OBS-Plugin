@@ -1,0 +1,109 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  OBS_VERSION: "30.2.3"   # oldest OBS the plugin targets; it also loads in newer versions
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get libobs headers
+        shell: bash
+        run: |
+          git clone -q --depth 1 --branch "$OBS_VERSION" --filter=blob:none --sparse \
+            https://github.com/obsproject/obs-studio obs-src
+          git -C obs-src sparse-checkout set libobs
+
+      - name: Make obs.lib from the official obs.dll
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download $env:OBS_VERSION -R obsproject/obs-studio -p "OBS-Studio-$env:OBS_VERSION-Windows.zip" -O obs.zip
+          Expand-Archive obs.zip -DestinationPath obs-bin
+          $dll = Get-ChildItem obs-bin -Recurse -Filter obs.dll | Where-Object { $_.FullName -match '64bit' } | Select-Object -First 1
+          "dll=$($dll.FullName)" | Out-File -Append $env:GITHUB_ENV
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build ascii-cam.dll
+        shell: pwsh
+        run: |
+          $names = dumpbin /nologo /exports $env:dll | Select-String '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]{8}\s+(\S+)' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+          if ($names.Count -lt 500) { throw "only $($names.Count) exports found in obs.dll" }
+          @("LIBRARY obs", "EXPORTS") + $names | Set-Content obs.def
+          lib /nologo /def:obs.def /out:obs.lib /machine:x64
+          New-Item -ItemType Directory -Force build | Out-Null
+          cl /nologo /O2 /LD /W3 /std:c17 /D_CRT_SECURE_NO_WARNINGS /I obs-src/libobs `
+            obs-plugin/src/ascii-cam-filter.c /Fo:build/ /Fe:build/ascii-cam.dll /link obs.lib
+
+      - name: Compile the shader with fxc (Direct3D)
+        shell: pwsh
+        run: |
+          python obs-plugin/tools/effect_to_hlsl.py obs-plugin/data/ascii-cam.effect build/check.hlsl
+          fxc /nologo /T ps_4_0 /E PSAscii /Fo build/ps.cso build/check.hlsl
+          if ($LASTEXITCODE) { exit 1 }
+          fxc /nologo /T vs_4_0 /E VSDefault /Fo build/vs.cso build/check.hlsl
+          if ($LASTEXITCODE) { exit 1 }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $root = "pkg/ascii-cam"
+          New-Item -ItemType Directory -Force "$root/bin/64bit", "$root/data" | Out-Null
+          Copy-Item build/ascii-cam.dll "$root/bin/64bit/"
+          Copy-Item obs-plugin/data/ascii-cam.effect, obs-plugin/data/atlas.png "$root/data/"
+          Compress-Archive -Path $root -DestinationPath ascii-matrix-cam-obs-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: ascii-matrix-cam-obs-windows-x64.zip
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libobs
+        run: sudo apt-get update && sudo apt-get install -y libobs-dev libsimde-dev
+      - name: Build
+        run: obs-plugin/build.sh --no-install
+      - name: Package
+        run: |
+          mkdir -p pkg/ascii-cam/bin/64bit pkg/ascii-cam/data
+          cp obs-plugin/build/ascii-cam.so pkg/ascii-cam/bin/64bit/
+          cp obs-plugin/data/ascii-cam.effect obs-plugin/data/atlas.png pkg/ascii-cam/data/
+          (cd pkg && tar czf ../ascii-matrix-cam-obs-linux-x86_64.tar.gz ascii-cam)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: ascii-matrix-cam-obs-linux-x86_64.tar.gz
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --notes "Download the zip for Windows or the tar.gz for Linux. Install steps are in the README." \
+            ascii-matrix-cam-obs-windows-x64.zip ascii-matrix-cam-obs-linux-x86_64.tar.gz

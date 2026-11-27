@@ -70,10 +70,28 @@ camera in Zoom, Meet, Discord or Teams.
 
 ## Standalone app
 
-```sh
-pip install -r app/requirements.txt     # PySide6 and numpy
-python app/ascii_cam.py                 # on Windows: py app\ascii_cam.py
-```
+### Install on Windows
+
+1. Install [Python 3](https://www.python.org/downloads/). In the installer, tick **Add python.exe to PATH**.
+2. On this page, click **Code** → **Download ZIP**, and extract it somewhere you'll keep it, such as `Documents`.
+3. In the extracted folder, open `app` and double-click **`install-windows.bat`**. It installs PySide6 and
+   numpy if needed, then adds an **ASCII Cam** icon to your desktop and Start menu.
+4. Double-click **ASCII Cam** on your desktop.
+
+If Windows shows "Windows protected your PC", click **More info** → **Run anyway**.
+
+### Install on Linux
+
+1. Click **Code** → **Download ZIP** (or `git clone` the repo), and extract it somewhere you'll keep it.
+2. Install PySide6 and numpy, from your distro (`sudo apt install python3-pyside6.qtwidgets python3-pyside6.qtmultimedia python3-numpy`
+   on Debian/Ubuntu, `sudo pacman -S pyside6 qt6-multimedia python-numpy` on Arch) or with `pip install -r app/requirements.txt`.
+3. In a terminal in the extracted folder, run `app/install-linux.sh`. It adds **ASCII Cam** to your app menu and desktop.
+4. Double-click **ASCII Cam** on your desktop. On KDE, choose **Allow / Execute** the first time.
+
+If you move the folder, run the installer again. To remove the icons, run it with `--uninstall` (Linux) or
+`-Uninstall` (Windows, from a terminal).
+
+**macOS, or without the icon:** `pip install -r app/requirements.txt`, then `python3 app/ascii_cam.py`.
 
 Options: `--cols 200` (more detail), `--camera 1` (another camera), and
 `--still in.jpg out.png --mode Matrix` to convert one image without opening a window.

@@ -434,6 +434,11 @@ def run_gui(args):
             self.status.setText("Copied the frame as text")
 
     app = QApplication(sys.argv[:1])
+    app.setDesktopFileName("ascii-cam")     # matches ascii-cam.desktop, so the taskbar shows its icon
+    icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.svg")
+    if os.path.exists(icon):
+        from PySide6.QtGui import QIcon
+        app.setWindowIcon(QIcon(icon))
     app.setDesktopFileName("ascii-cam")
     win = Window()
     win.show()
